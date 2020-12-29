@@ -4,31 +4,34 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.ResponseEntity;
-import org.springframework.util.MultiValueMap;
+import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
-
 import java.util.*;
 
 @SpringBootApplication
 public class BoardsyncerApplication {
 
-	static RestTemplate restTemplate = new RestTemplate();
-	static boolean deleteExtras = true;
+	static String jiraUrl = "https://jobcrawler.atlassian.net";
+	static String projectName = "Jobcrawler";
 	@Value("${spring.boardsync.jira}")
 	private String jiraToken;
 	@Value("${spring.boardsync.github}")
 	private String gitHubToken;
+	static boolean deleteExtras = false;
+
+	static RestTemplate restTemplate = new RestTemplate();
+	static Map<String,String> replaceColumns = new HashMap<>();
+	static String url2 = "https://api.github.com/orgs/OrdinaNederland/projects";
+
+	static {
+		replaceColumns.put("In Progress","Doing");
+	}
 
 	public static void main(String[] args) {
-
 		SpringApplication.run(BoardsyncerApplication.class, args);
 	}
 
-/*		Requests performed by syncBoards:
+/*		Requests performed by syncBoards (o is optional by deleteExtras boolean):
 			Request to Jira:
 			1: Retrieve issues
 			Requests to GitHub (o are optional, to delete superfluous):
@@ -36,8 +39,9 @@ public class BoardsyncerApplication {
 			3: Find column ID's
 			4 (o): Delete unnecessary columns
 			5: Add columns if necessary
-			6: Put the columns in order
-			7: Per column:
+			6: Obtain column ID's again
+			7: Put the columns in order
+			8: Per column:
 				a: Find what cards are there
 				b (o): For each card with a name that doesn't belong there, delete it.
 				c: Update/add cards
@@ -46,12 +50,16 @@ public class BoardsyncerApplication {
 
 	@Bean
 	public void syncBoards() {
-
 		HttpHeaders jiraHeaders = new HttpHeaders();
 		jiraHeaders.add("Authorization", "Basic " + jiraToken);
 		jiraHeaders.add("content-type", "application/json");
+		HttpHeaders gitHubHeaders = new HttpHeaders();
+		gitHubHeaders.add("Authorization", "token " + gitHubToken);
+		gitHubHeaders.add("Accept", "application/vnd.github.inertia-preview+json");
+		HttpEntity<String> ghRequestEmptyBody = new HttpEntity<>("", gitHubHeaders);
 
-		String url1 = "https://jobcrawler.atlassian.net/rest/api/latest/search?maxResults=";
+		//1. Obtain issues from Jira
+		String url1 = jiraUrl + "/rest/api/latest/search?maxResults=";
 		HttpEntity<String> request1 = new HttpEntity<>("", jiraHeaders);
 		ResponseEntity<Map> response1 = restTemplate.exchange(url1 + "1000", HttpMethod.GET, request1, Map.class);
 		ArrayList<Map<String, Object>> jsonIssues = (ArrayList<Map<String, Object>>) response1.getBody().get("issues");
@@ -65,33 +73,23 @@ public class BoardsyncerApplication {
 			jsonIssues = (ArrayList<Map<String, Object>>) response.getBody().get("issues");
 			issues = saveIssues(jsonIssues, issues);
 		}
-
 		//2. Find Project id
-		String url2 = "https://api.github.com/orgs/OrdinaNederland/projects";
-		HttpHeaders gitHubHeaders = new HttpHeaders();
-		gitHubHeaders.add("Authorization", "token " + gitHubToken);
-		gitHubHeaders.add("Accept", "application/vnd.github.inertia-preview+json");
-		HttpEntity<String> ghRequestEmptyBody = new HttpEntity<>("", gitHubHeaders);
 		ResponseEntity<List> response2 = restTemplate.exchange(url2, HttpMethod.GET, ghRequestEmptyBody, List.class);
-
 		Integer projectId = 0;
 		for (int i = 0; i < response2.getBody().size(); i++) {
 			Map<String, Object> project = (Map<String, Object>) response2.getBody().get(i);
-			if (project.get("name").equals("Jobcrawler")) {
+			if (project.get("name").equals(projectName)) {
 				projectId = (Integer) project.get("id");
 			}
 		}
-
 		//3. Finding column names
 		String url3 = "https://api.github.com/projects/" + projectId + "/columns";
 		ResponseEntity<List> response3 = restTemplate.exchange(url3, HttpMethod.GET, ghRequestEmptyBody, List.class);
-
 		Map<String, Integer> columnIds = new HashMap<>();
 		for (int i = 0; i < response3.getBody().size(); i++) {
 			Map<String, Object> column = (Map<String, Object>) response3.getBody().get(i);
 			columnIds.put((String) column.get("name"), (Integer) column.get("id"));
 		}
-
 		//Establish desired column names
 		Set<String> columnNamesJira = new HashSet<>();
 		columnNamesJira.addAll(issues.keySet());
@@ -103,18 +101,14 @@ public class BoardsyncerApplication {
 		desiredColumnNames.add("Done");
 		columnNamesJira.removeAll(desiredColumnNames);
 		desiredColumnNames.addAll(columnNamesJira);	//And any additional ones from Jira
-
-		//4. Delete superfluous columns
+		//4. Delete all columns if deleteExtras is on (what needs to be added will be added later)
 		if(deleteExtras) {
 			columnIds.forEach((String colName, Integer colId) -> {
-					if (!desiredColumnNames.contains(colName)) {
-						String url4 = "https://api.github.com/projects/columns/" + colId;
-						ResponseEntity<List> response4 = restTemplate.exchange(url4, HttpMethod.DELETE, ghRequestEmptyBody, List.class);
-					}
+					String url4 = "https://api.github.com/projects/columns/" + colId;
+					ResponseEntity<List> response4 = restTemplate.exchange(url4, HttpMethod.DELETE, ghRequestEmptyBody, List.class);
 				}
 			);
 		}
-
 		//5. Add columns that aren't there yet
 		for (String s : desiredColumnNames) {
 			if (!columnIds.containsKey(s)) {
@@ -125,83 +119,82 @@ public class BoardsyncerApplication {
 				columnIds.put(s, (Integer) response5.getBody().get("id"));
 			}
 		}
-
-		//6. Move columns to the right order
-		for (int i = 1; i < desiredColumnNames.size(); i++) {
-			String url6 = "https://api.github.com/projects/columns/" + columnIds.get(desiredColumnNames.get(i)) + "/moves";
-			String body6 = "{\"position\": \"after:" + columnIds.get(desiredColumnNames.get(i - 1)) + "\"}";
-			HttpEntity<String> request6 = new HttpEntity<>(body6, gitHubHeaders);
-			ResponseEntity<Map> response6 = restTemplate.exchange(url6, HttpMethod.POST, request6, Map.class);
+		//6. Finding column names again
+		String url6 = "https://api.github.com/projects/" + projectId + "/columns";
+		ResponseEntity<List> response6 = restTemplate.exchange(url6, HttpMethod.GET, ghRequestEmptyBody, List.class);
+		columnIds = new HashMap<>();
+		for (int i = 0; i < response6.getBody().size(); i++) {
+			Map<String, Object> column = (Map<String, Object>) response6.getBody().get(i);
+			columnIds.put((String) column.get("name"), (Integer) column.get("id"));
 		}
 
-		//7a. Per column, obtain cards. Id and text
-		Map<String, Map<Integer, String>> cards = new HashMap<>();
+		//7. Move columns to the right order
+		for (int i = 1; i < desiredColumnNames.size(); i++) {
+			String url7 = "https://api.github.com/projects/columns/" + columnIds.get(desiredColumnNames.get(i)) + "/moves";
+			String body7 = "{\"position\": \"after:" + columnIds.get(desiredColumnNames.get(i - 1)) + "\"}";
+			HttpEntity<String> request7 = new HttpEntity<>(body7, gitHubHeaders);
+			ResponseEntity<Map> response7 = restTemplate.exchange(url7, HttpMethod.POST, request7, Map.class);
+		}
+		//8a. Per column, obtain cards. Id and text
 		for (int i = 0; i < desiredColumnNames.size(); i++) {    //Loops through columns to get cards
-			String url7a = "https://api.github.com/projects/columns/" + columnIds.get(desiredColumnNames.get(i)) + "/cards";
-			ResponseEntity<ArrayList> response7a = restTemplate.exchange(url7a, HttpMethod.GET, ghRequestEmptyBody, ArrayList.class);
-			for (int j = 0; j < response7a.getBody().size(); j++) {        //Loops through cards, deletes ones with same name as issues, and perhaps deletes superfluous ones
-				Map<String, Object> card = (Map<String, Object>) response7a.getBody().get(j);
-				Integer cardId = (Integer) card.get("id");
-				String cardText = (String) card.get("note");
-				int bi = Math.max(cardText.indexOf("<u>"),0);
-				int ei = Math.max(cardText.indexOf("</u>"),0);
-				String issueTitle = cardText.substring(bi,ei).trim();
-				//7b. Delete cards if they're issues from Jira (because they're added again later) or superfluous (optional)
-				if ((issues.get(desiredColumnNames.get(i)).containsKey(issueTitle)) || deleteExtras && !issues.get(desiredColumnNames.get(i)).containsKey(issueTitle)) {
-					String url7b = "https://api.github.com/projects/columns/cards/" + cardId;
-					ResponseEntity<ArrayList> response7b = restTemplate.exchange(url7b, HttpMethod.DELETE, ghRequestEmptyBody, ArrayList.class);
-				}
+			Map<String, Integer> cards = getCardsInColumn(columnIds.get(desiredColumnNames.get(i)),ghRequestEmptyBody);
+			Map<String, String> issues4column = issues.get(desiredColumnNames.get(i));
+			if (!deleteExtras) {	//Only if deleteExtras is false, the below is necessary (otherwise the columns were deleted earlier)
+				cards.forEach((String issueTitle, Integer cardId) -> { // 8b. Loops through cards, deletes ones with same name
+					if (issues4column.containsKey(issueTitle)) {	   // as Jira issues (because they're added again later)
+						String url8b = "https://api.github.com/projects/columns/cards/" + cardId;
+						restTemplate.exchange(url8b, HttpMethod.DELETE, ghRequestEmptyBody, ArrayList.class);
+					}
+				});
 			}
-			//7c. Loop through issues (for 1 column) and add cards
-			String url7c = "https://api.github.com/projects/columns/" + columnIds.get(desiredColumnNames.get(i)) + "/cards";
+			//8c. Loop through issues (for 1 column) and add cards
+			String url8c = "https://api.github.com/projects/columns/" + columnIds.get(desiredColumnNames.get(i)) + "/cards";
 			issues.get(desiredColumnNames.get(i)).forEach((String title, String desc) -> {
-				HttpEntity<String> request7c = new HttpEntity<>("{\"note\":\"" + desc + "\"}", gitHubHeaders);
+				HttpEntity<String> request8c = new HttpEntity<>("{\"note\":\"" + desc + "\"}", gitHubHeaders);
 				try {
-					ResponseEntity<ArrayList> response7c = restTemplate.exchange(url7c, HttpMethod.POST, request7c, ArrayList.class);
+					ResponseEntity<ArrayList> response8c = restTemplate.exchange(url8c, HttpMethod.POST, request8c, ArrayList.class);
 				} catch(Exception e) {
 				}
 			});
-
-			//7d. Obtain cards again
-			String url7d = "https://api.github.com/projects/columns/" + columnIds.get(desiredColumnNames.get(i)) + "/cards";
-			ResponseEntity<ArrayList> response7d = restTemplate.exchange(url7d, HttpMethod.GET, ghRequestEmptyBody, ArrayList.class);
-			Map<String, Integer> cardTitles = new HashMap<>(); // card ID, card title, card order
-			for (int j = 0; j < response7d.getBody().size(); j++) {        //Loops through cards, sorts them
-				Map<String, Object> card = (Map<String, Object>) response7d.getBody().get(j);
-				Integer cardId = (Integer) card.get("id");
-				String cardText = (String) card.get("note");
-				int bi = cardText.indexOf("<b>")==-1?0:cardText.indexOf("<b>")+3;
-				int ei = cardText.indexOf("</b>")==-1?0:cardText.indexOf("</b>");
-				String issueTitle = cardText.substring(bi,ei).trim();
-				cardTitles.put(issueTitle, cardId);
-			}
-			Object[] cardTitlesArr = cardTitles.keySet().toArray();
+			//8d. Obtain cards again, extract titles, and sort them
+			cards = getCardsInColumn(columnIds.get(desiredColumnNames.get(i)),ghRequestEmptyBody);
+			Object[] cardTitlesArr = cards.keySet().toArray();
 			String[] cardTitlesSorted = new String[cardTitlesArr.length];
 			for(int j = 0; j < cardTitlesArr.length; j++) {
 				cardTitlesSorted[j] = (String) cardTitlesArr[j];
 			}
-			Arrays.sort(cardTitlesSorted);
+			Arrays.sort(cardTitlesSorted,(String title1, String title2) -> {	//Custom sorting function, to take number
+				Integer di1 = title1.indexOf('-')==-1?title1.length():title1.indexOf('-');	//at end of title into account
+				Integer di2 = title2.indexOf('-')==-1?title2.length():title2.indexOf('-');
+				String text1 = title1.substring(0,di1);
+				String text2 = title2.substring(0,di2);
+				if(text1.compareToIgnoreCase(text2)==0) {
+					Integer n1 = di1 == -1 ? 0 : Integer.parseInt(title1.substring(di1 + 1));
+					Integer n2 = di2 == -1 ? 0 : Integer.parseInt(title2.substring(di2 + 1));
+					return n1.compareTo(n2);
+				} else {
+					return text1.compareToIgnoreCase(text2);
+				}
+			});
 			Map<String, String> cardsOrder = new HashMap<>();
 			cardsOrder.put(cardTitlesSorted[0],"top");
 			for(int j = 1; j < cardTitlesSorted.length; j++) {
-				Integer cardIdPrevious = cardTitles.get(cardTitlesSorted[j-1]);
+				Integer cardIdPrevious = cards.get(cardTitlesSorted[j-1]);
 				cardsOrder.put(cardTitlesSorted[j],"after:" + cardIdPrevious);
 			}
+			//8e. Sort the cards
 			for(int j = 0; j < cardTitlesSorted.length; j++) {
-				String url7e = "https://api.github.com/projects/columns/cards/" + cardTitles.get(cardTitlesSorted[j]) + "/moves";
-				HttpEntity<String> request7e = new HttpEntity<>("{\"position\":\"" + cardsOrder.get(cardTitlesSorted[j]) + "\"}", gitHubHeaders);
-				try{	//7e. Sort cards
-					ResponseEntity<ArrayList> response7e = restTemplate.exchange(url7e, HttpMethod.POST, request7e, ArrayList.class);
+				String url8e = "https://api.github.com/projects/columns/cards/" + cards.get(cardTitlesSorted[j]) + "/moves";
+				HttpEntity<String> request8e = new HttpEntity<>("{\"position\":\"" + cardsOrder.get(cardTitlesSorted[j]) + "\"}", gitHubHeaders);
+				try{
+					ResponseEntity<ArrayList> response8e = restTemplate.exchange(url8e, HttpMethod.POST, request8e, ArrayList.class);
 				} catch(Exception e) {
 				}
 			}
 		}
 	}
 
-
 	private Map<String, Map<String,String>> saveIssues(ArrayList<Map<String,Object>> jsonIssues, Map<String, Map<String,String>> issues) {
-		Map<String,String> replaceColumns = new HashMap<>();
-		replaceColumns.put("In Progress","Doing");
 		jsonIssues.forEach((Map<String, Object> m) -> {
 			Map<String, Object> jsonFields = (Map<String, Object>) m.get("fields");
 			if(jsonFields.containsKey("parent")) {
@@ -226,7 +219,31 @@ public class BoardsyncerApplication {
 				}
 			}
 		});
-		return issues;
+	return issues;
 	}
 
+	private Map<String, Integer> getCardsInColumn(Integer columnId, HttpEntity<String> ghRequestEmptyBody) {
+		boolean finished = false;
+		int pn = 1;
+		Map<String,Integer> cards = new HashMap<>();
+		while(!finished) {
+			String url = "https://api.github.com/projects/columns/" + columnId + "/cards?per_page=100&page=" + pn;
+			ResponseEntity<ArrayList> response = restTemplate.exchange(url, HttpMethod.GET, ghRequestEmptyBody, ArrayList.class);
+			for (int j = 0; j < response.getBody().size(); j++) {        //Obtains card titles and ids
+				Map<String, Object> card = (Map<String, Object>) response.getBody().get(j);
+				Integer cardId = (Integer) card.get("id");
+				String cardText = (String) card.get("note");
+				int bi = cardText.indexOf("<b>")==-1?0:cardText.indexOf("<b>")+3;
+				int ei = cardText.indexOf("</b>")==-1?0:cardText.indexOf("</b>");
+				String issueTitle = cardText.substring(bi,ei).trim();
+				cards.put(issueTitle, cardId);
+			}
+			if(response.getBody().size()!=100) {	//If the response had 100 entries, go to the next page, otherwise stop
+				finished = true;
+			} else {
+				pn++;
+			}
+		}
+		return cards;
+	}
 }
