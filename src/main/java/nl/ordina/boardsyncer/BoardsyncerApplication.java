@@ -11,13 +11,16 @@ import java.util.*;
 @SpringBootApplication
 public class BoardsyncerApplication {
 
-	static String jiraUrl = "https://jobcrawler.atlassian.net";
-	static String projectName = "Jobcrawler";
-	@Value("${spring.boardsync.jira}")
+	@Value("${JIRA_URL}")
+	private String jiraUrl;
+	@Value("${PROJECT_NAME}")
+	private String projectName;
+	@Value("${JIRA_TOKEN}")
 	private String jiraToken;
-	@Value("${spring.boardsync.github}")
+	@Value("${GITHUB_TOKEN}")
 	private String gitHubToken;
-	static boolean deleteExtras = false;
+	@Value("${DELETE_EXTRAS:false}")
+	boolean deleteExtras;
 
 	static RestTemplate restTemplate = new RestTemplate();
 	static Map<String,String> replaceColumns = new HashMap<>();
@@ -108,6 +111,7 @@ public class BoardsyncerApplication {
 					ResponseEntity<List> response4 = restTemplate.exchange(url4, HttpMethod.DELETE, ghRequestEmptyBody, List.class);
 				}
 			);
+			columnIds = new HashMap<>();
 		}
 		//5. Add columns that aren't there yet
 		for (String s : desiredColumnNames) {
@@ -127,7 +131,6 @@ public class BoardsyncerApplication {
 			Map<String, Object> column = (Map<String, Object>) response6.getBody().get(i);
 			columnIds.put((String) column.get("name"), (Integer) column.get("id"));
 		}
-
 		//7. Move columns to the right order
 		for (int i = 1; i < desiredColumnNames.size(); i++) {
 			String url7 = "https://api.github.com/projects/columns/" + columnIds.get(desiredColumnNames.get(i)) + "/moves";
